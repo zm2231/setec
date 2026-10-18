@@ -95,9 +95,20 @@ func OpenDevicePath(path string) (transport.TPM, error) {
 // If no file exists at path, a new key is generated, sealed to the TPM, and
 // saved there with mode 0600.
 func OpenOrCreate(tpm transport.TPM, path string) (tink.AEAD, error) {
+	secret, err := openOrCreate(tpm, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return newAEAD(secret)
+}
+
+// openOrCreate returns the raw key sealed in the file at path, creating it if
+// needed. If escrow is non-nil, it is called with the raw key before a newly
+// created key is saved, or after an existing key is unsealed.
+func openOrCreate(tpm transport.TPM, path string, escrow func([]byte) error) ([]byte, error) {
 	bs, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return create(tpm, path)
+		return create(tpm, path, escrow)
 	} else if err != nil {
 		return nil, err
 	}
@@ -163,12 +174,19 @@ func OpenOrCreate(tpm transport.TPM, path string) (tink.AEAD, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unsealing key: %w", err)
 	}
-	return newAEAD(unsealRsp.OutData.Buffer)
+	secret := unsealRsp.OutData.Buffer
+	if escrow != nil {
+		if err := escrow(secret); err != nil {
+			return nil, err
+		}
+	}
+	return secret, nil
 }
 
 // create generates a new key, seals it to the TPM, saves the sealed blob to
-// path with mode 0600, and returns a [tink.AEAD] keyed by it.
-func create(tpm transport.TPM, path string) (tink.AEAD, error) {
+// path with mode 0600, and returns the raw key. If escrow is non-nil, it is
+// called with the raw key before the sealed blob is saved.
+func create(tpm transport.TPM, path string, escrow func([]byte) error) ([]byte, error) {
 	// TODO: when runtime/secret is stabilized, we should wrap this
 	// function so that it erases the raw key material from memory
 
@@ -248,10 +266,15 @@ func create(tpm transport.TPM, path string) (tink.AEAD, error) {
 	if err != nil {
 		return nil, fmt.Errorf("serializing sealed key: %w", err)
 	}
+	if escrow != nil {
+		if err := escrow(secret); err != nil {
+			return nil, err
+		}
+	}
 	if err := atomicfile.WriteFile(path, out, 0600); err != nil {
 		return nil, fmt.Errorf("writing sealed key: %w", err)
 	}
-	return newAEAD(secret)
+	return secret, nil
 }
 
 // srk describes a loaded storage root key.

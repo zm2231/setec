@@ -28,6 +28,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"filippo.io/age"
 	"github.com/creachadair/command"
 	"github.com/creachadair/flax"
 	"github.com/tailscale/setec/acl"
@@ -83,6 +84,16 @@ Otherwise you must provide a key to encrypt the database, using exactly one of:
                    Use the --tpm-device flag to select a TPM device; the
                    default is /dev/tpmrm0
 
+                   Add --tpm-key-escrow-file and --tpm-key-escrow-recipients
+                   to also keep a copy of the key, encrypted with age to the
+                   recipients in the named file. The copy is written before a
+                   new key is sealed, or after an existing one is unsealed if
+                   the copy is missing.
+
+  --escrow-identity-file - to recover without the TPM: decrypt the key in
+                   --tpm-key-escrow-file with the age identities in the named
+                   file, and use it instead of a TPM.
+
 Most of the settings can be set via environment variables as well as flags.
 
    -------------------------------------------------------------------------
@@ -93,6 +104,11 @@ Most of the settings can be set via environment variables as well as flags.
     --kms-key-name         SETEC_KMS_KEY_NAME         string    (see above)
     --tpm-key-file         SETEC_TPM_KEY_FILE         path      (see above)
     --tpm-device           SETEC_TPM_DEVICE           path      (/dev/tpmrm0)
+    --tpm-key-escrow-file  SETEC_TPM_KEY_ESCROW_FILE  path      (optional)
+    --tpm-key-escrow-recipients
+                           SETEC_TPM_KEY_ESCROW_RECIPIENTS
+                                                      path      (optional)
+    --escrow-identity-file SETEC_ESCROW_IDENTITY_FILE path      (see above)
     --backup-bucket        SETEC_BACKUP_BUCKET        string    (optional)
     --backup-bucket-region SETEC_BACKUP_BUCKET_REGION string    (optional)
     --backup-role          SETEC_BACKUP_ROLE          string    (optional)
@@ -184,6 +200,9 @@ var serverArgs struct {
 	KMSKeyName         string `flag:"kms-key-name,default=$SETEC_KMS_KEY_NAME,Name of KMS key to use for database encryption"`
 	TPMKeyFile         string `flag:"tpm-key-file,default=$SETEC_TPM_KEY_FILE,Path of TPM-sealed key file to use for database encryption (created if missing)"`
 	TPMDevice          string `flag:"tpm-device,default=$SETEC_TPM_DEVICE,Path of TPM device to use with --tpm-key-file"`
+	TPMKeyEscrowFile   string `flag:"tpm-key-escrow-file,default=$SETEC_TPM_KEY_ESCROW_FILE,Path of an age-encrypted copy of the TPM-sealed key (written if missing)"`
+	TPMKeyEscrowRcpts  string `flag:"tpm-key-escrow-recipients,default=$SETEC_TPM_KEY_ESCROW_RECIPIENTS,Path of the age recipients file to encrypt --tpm-key-escrow-file to"`
+	EscrowIdentityFile string `flag:"escrow-identity-file,default=$SETEC_ESCROW_IDENTITY_FILE,Path of an age identity file to decrypt --tpm-key-escrow-file with, used instead of a TPM"`
 	BackupBucket       string `flag:"backup-bucket,default=$SETEC_BACKUP_BUCKET,Name of AWS S3 bucket to use for database backups"`
 	BackupBucketRegion string `flag:"backup-bucket-region,default=$SETEC_BACKUP_BUCKET_REGION,AWS region of the backup S3 bucket"`
 	BackupRole         string `flag:"backup-role,default=$SETEC_BACKUP_ROLE,Name of AWS IAM role to assume to write backups"`
@@ -212,7 +231,7 @@ func runServer(env *command.Env) error {
 
 		log.Printf("dev mode: state dir is %q", serverArgs.StateDir)
 		log.Printf("dev mode: hostname is %q", serverArgs.Hostname)
-		if serverArgs.KMSKeyName == "" && serverArgs.TPMKeyFile == "" {
+		if serverArgs.KMSKeyName == "" && serverArgs.TPMKeyFile == "" && serverArgs.EscrowIdentityFile == "" {
 			log.Println("dev mode: using dummy KMS, NOT SAFE FOR PRODUCTION USE")
 			kek = &tinktestutil.DummyAEAD{
 				Name: "SetecDevOnlyDummyEncryption",
@@ -227,9 +246,27 @@ func runServer(env *command.Env) error {
 		return errors.New("--hostname must be specified")
 	}
 	if kek == nil {
+		if (serverArgs.TPMKeyEscrowFile != "") != (serverArgs.TPMKeyEscrowRcpts != "" || serverArgs.EscrowIdentityFile != "") {
+			return errors.New("--tpm-key-escrow-file must be given together with one of --tpm-key-escrow-recipients or --escrow-identity-file")
+		}
 		switch {
 		case serverArgs.KMSKeyName != "" && serverArgs.TPMKeyFile != "":
 			return errors.New("--kms-key-name and --tpm-key-file are mutually exclusive")
+		case serverArgs.TPMKeyEscrowRcpts != "" && serverArgs.EscrowIdentityFile != "":
+			return errors.New("--tpm-key-escrow-recipients and --escrow-identity-file are mutually exclusive")
+		case serverArgs.TPMKeyEscrowRcpts != "" && serverArgs.TPMKeyFile == "":
+			return errors.New("--tpm-key-escrow-recipients requires --tpm-key-file")
+		case serverArgs.EscrowIdentityFile != "" && (serverArgs.KMSKeyName != "" || serverArgs.TPMKeyFile != ""):
+			return errors.New("--escrow-identity-file cannot be combined with --kms-key-name or --tpm-key-file")
+		case serverArgs.EscrowIdentityFile != "":
+			identities, err := readAgeFile(serverArgs.EscrowIdentityFile, age.ParseIdentities)
+			if err != nil {
+				return fmt.Errorf("reading escrow identities: %w", err)
+			}
+			kek, err = tpmkey.OpenEscrow(serverArgs.TPMKeyEscrowFile, identities)
+			if err != nil {
+				return fmt.Errorf("opening escrowed key: %w", err)
+			}
 		case serverArgs.KMSKeyName != "":
 			// Tink requires prefixing the key identifier with a URI
 			// scheme that identifies the correct backend to use.
@@ -252,12 +289,20 @@ func runServer(env *command.Env) error {
 				return fmt.Errorf("opening TPM device %q: %v", devPath, err)
 			}
 
-			kek, err = tpmkey.OpenOrCreate(device, serverArgs.TPMKeyFile)
+			if serverArgs.TPMKeyEscrowFile != "" {
+				recipients, err := readAgeFile(serverArgs.TPMKeyEscrowRcpts, age.ParseRecipients)
+				if err != nil {
+					return fmt.Errorf("reading escrow recipients: %w", err)
+				}
+				kek, err = tpmkey.OpenOrCreateEscrowed(device, serverArgs.TPMKeyFile, serverArgs.TPMKeyEscrowFile, recipients)
+			} else {
+				kek, err = tpmkey.OpenOrCreate(device, serverArgs.TPMKeyFile)
+			}
 			if err != nil {
 				return fmt.Errorf("opening TPM-sealed key file: %v", err)
 			}
 		default:
-			return errors.New("either --kms-key-name or --tpm-key-file must be specified")
+			return errors.New("one of --kms-key-name, --tpm-key-file or --escrow-identity-file must be specified")
 		}
 	}
 
@@ -663,6 +708,15 @@ func checkPutText(value []byte) ([]byte, error) {
 // loadAccessIndex reads an audit log from the specified path and constructs a
 // last-access index from it. It reports nil without error if the path does not
 // exist.
+func readAgeFile[T any](path string, parse func(io.Reader) ([]T, error)) ([]T, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return parse(f)
+}
+
 func loadAccessIndex(path string) (db.AccessIndex, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {

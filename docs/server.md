@@ -69,6 +69,32 @@ attach to a VM. Two caveats to be aware of when using a vTPM:
 On systems without TPM support (such as Darwin), the server will report an
 error at startup when `--tpm-key-file` is set.
 
+Because a sealed key dies with its TPM, the server can also keep an escrow
+copy of the key, encrypted with [age][age] to recipients you control:
+
+```shell
+setec server ... \
+  --tpm-key-file=$HOME/setec-state/setec-tpm.key \
+  --tpm-key-escrow-file=$HOME/setec-state/setec-tpm.key.age \
+  --tpm-key-escrow-recipients=$HOME/setec-state/escrow-recipients.txt
+```
+
+The recipients file holds one native age recipient (`age1...`) per line. The
+escrow copy is written before a new key is sealed, so a sealed key never
+exists without one, and is written after unsealing an existing key if it is
+missing. Store the escrow file off the server along with database backups; it
+never changes once written. If the escrow file exists but the sealed key file
+does not, the server refuses to start rather than generate a new key.
+
+To recover on another machine, with or without a TPM, start the server with
+the escrow file and a matching age identity in place of `--tpm-key-file`:
+
+```shell
+setec server ... \
+  --tpm-key-escrow-file=setec-tpm.key.age \
+  --escrow-identity-file=escrow-identity.txt
+```
+
 For development and testing purposes, the server also supports a `--dev` flag,
 which runs using a "dummy" static access key. **This mode is not secure for
 production use**, but is useful for testing and debugging integrations locally.
@@ -214,6 +240,7 @@ server's state directory.
 
 
 [acl]: https://tailscale.com/kb/1018/acls
+[age]: https://age-encryption.org
 [admin-keys]: https://login.tailscale.com/admin/settings/keys
 [awsvault]: https://github.com/ByteNess/aws-vault
 [cli]: https://github.com/tailscale/setec/tree/main/cmd/setec
