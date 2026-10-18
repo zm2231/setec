@@ -1,0 +1,31 @@
+services:
+  setec:
+    image: setec:${SETEC_COMMIT:?set SETEC_COMMIT}
+    build:
+      context: ./src
+      dockerfile: deploy/forge/Dockerfile
+    user: "65532:65532"
+    group_add:
+      - "${TSS_GID:?set TSS_GID}"
+    devices:
+      - /dev/tpmrm0:/dev/tpmrm0
+    environment:
+      SETEC_STATE_DIR: /state
+      SETEC_HOSTNAME: secrets
+      SETEC_TPM_KEY_FILE: /state/setec-tpm.key
+      SETEC_TPM_KEY_ESCROW_FILE: /state/setec-tpm.key.age
+      SETEC_TPM_KEY_ESCROW_RECIPIENTS: /config/escrow-recipients.txt
+    env_file:
+      - path: ./backup.env
+        required: false
+      - path: ./authkey.env
+        required: false
+    volumes:
+      - ./state:/state
+      - ./escrow-recipients.txt:/config/escrow-recipients.txt:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+    restart: unless-stopped
