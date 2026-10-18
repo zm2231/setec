@@ -9,9 +9,11 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"filippo.io/age"
+	"filippo.io/age/armor"
 	"github.com/tink-crypto/tink-go/v2/tink"
 
 	"github.com/tailscale/setec/acl"
@@ -285,9 +287,10 @@ func TestOpenEscrowMalformed(t *testing.T) {
 		t.Error("OpenEscrow of a non-age file unexpectedly succeeded")
 	}
 
-	for _, size := range []int{0, 31, 33} {
+	for _, size := range []int{0, 31, 32, 33} {
 		var buf bytes.Buffer
-		w, err := age.Encrypt(&buf, id.Recipient())
+		aw := armor.NewWriter(&buf)
+		w, err := age.Encrypt(aw, id.Recipient())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -297,11 +300,20 @@ func TestOpenEscrowMalformed(t *testing.T) {
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
+		if err := aw.Close(); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(escrowPath, buf.Bytes(), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tpmkey.OpenEscrow(escrowPath, []age.Identity{id}); err == nil {
+		_, err = tpmkey.OpenEscrow(escrowPath, []age.Identity{id})
+		switch {
+		case size == 32 && err != nil:
+			t.Errorf("OpenEscrow of a 32-byte key: %v", err)
+		case size != 32 && err == nil:
 			t.Errorf("OpenEscrow of a %d-byte key unexpectedly succeeded", size)
+		case size != 32 && !strings.Contains(err.Error(), "size"):
+			t.Errorf("OpenEscrow of a %d-byte key failed for another reason: %v", size, err)
 		}
 	}
 }
