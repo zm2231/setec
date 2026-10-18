@@ -231,3 +231,77 @@ func TestEscrowRestoresDatabase(t *testing.T) {
 		t.Error("sealed key unexpectedly opened on a different TPM")
 	}
 }
+
+func TestEscrowSamePath(t *testing.T) {
+	tpm := newSimulatedTPM(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tpm-sealed.key")
+	link := filepath.Join(dir, "linked.key")
+	recipients := []age.Recipient{newIdentity(t).Recipient()}
+
+	if _, err := tpmkey.OpenOrCreateEscrowed(tpm, path, path, recipients); err == nil {
+		t.Fatal("OpenOrCreateEscrowed with identical paths unexpectedly succeeded")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a file was created at the shared path: %v", err)
+	}
+
+	if _, err := tpmkey.OpenOrCreate(tpm, path); err != nil {
+		t.Fatalf("OpenOrCreate: %v", err)
+	}
+	if err := os.Link(path, link); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, escrowPath := range []string{path, filepath.Join(dir, ".", "tpm-sealed.key"), link} {
+		if _, err := tpmkey.OpenOrCreateEscrowed(tpm, path, escrowPath, recipients); err == nil {
+			t.Errorf("OpenOrCreateEscrowed with escrow path %q naming the sealed key file unexpectedly succeeded", escrowPath)
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("sealed key file was modified")
+	}
+}
+
+func TestOpenEscrowMalformed(t *testing.T) {
+	dir := t.TempDir()
+	id := newIdentity(t)
+	escrowPath := filepath.Join(dir, "escrow.age")
+
+	if _, err := tpmkey.OpenEscrow(filepath.Join(dir, "missing.age"), []age.Identity{id}); err == nil {
+		t.Error("OpenEscrow of a missing file unexpectedly succeeded")
+	}
+	if err := os.WriteFile(escrowPath, []byte("not an age file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tpmkey.OpenEscrow(escrowPath, []age.Identity{id}); err == nil {
+		t.Error("OpenEscrow of a non-age file unexpectedly succeeded")
+	}
+
+	for _, size := range []int{0, 31, 33} {
+		var buf bytes.Buffer
+		w, err := age.Encrypt(&buf, id.Recipient())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(make([]byte, size)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(escrowPath, buf.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tpmkey.OpenEscrow(escrowPath, []age.Identity{id}); err == nil {
+			t.Errorf("OpenEscrow of a %d-byte key unexpectedly succeeded", size)
+		}
+	}
+}

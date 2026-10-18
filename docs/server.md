@@ -80,9 +80,10 @@ setec server ... \
 ```
 
 The recipients file holds one native age recipient (`age1...`) per line. The
-escrow copy is written before a new key is sealed, so a sealed key never
-exists without one, and is written after unsealing an existing key if it is
-missing. Store the escrow file off the server along with database backups; it
+escrow copy is saved and synced to disk before a new sealed key file is saved,
+so a sealed key file never exists without one, and is written after unsealing
+an existing key if it is missing. The escrow file must be a different file
+from the sealed key file. Store the escrow file off the server along with database backups; it
 never changes once written. If the escrow file exists but the sealed key file
 does not, the server refuses to start rather than generate a new key.
 

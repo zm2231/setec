@@ -86,9 +86,9 @@ Otherwise you must provide a key to encrypt the database, using exactly one of:
 
                    Add --tpm-key-escrow-file and --tpm-key-escrow-recipients
                    to also keep a copy of the key, encrypted with age to the
-                   recipients in the named file. The copy is written before a
-                   new key is sealed, or after an existing one is unsealed if
-                   the copy is missing.
+                   recipients in the named file. The copy is saved before a
+                   new sealed key file is saved, or after an existing one is
+                   unsealed if the copy is missing.
 
   --escrow-identity-file - to recover without the TPM: decrypt the key in
                    --tpm-key-escrow-file with the age identities in the named
@@ -216,6 +216,9 @@ var clientArgs struct {
 }
 
 func runServer(env *command.Env) error {
+	if err := checkEscrowFlags(serverArgs.KMSKeyName, serverArgs.TPMKeyFile, serverArgs.TPMKeyEscrowFile, serverArgs.TPMKeyEscrowRcpts, serverArgs.EscrowIdentityFile); err != nil {
+		return err
+	}
 	var kek tink.AEAD
 	if serverArgs.Dev {
 		if serverArgs.StateDir == "" {
@@ -246,18 +249,9 @@ func runServer(env *command.Env) error {
 		return errors.New("--hostname must be specified")
 	}
 	if kek == nil {
-		if (serverArgs.TPMKeyEscrowFile != "") != (serverArgs.TPMKeyEscrowRcpts != "" || serverArgs.EscrowIdentityFile != "") {
-			return errors.New("--tpm-key-escrow-file must be given together with one of --tpm-key-escrow-recipients or --escrow-identity-file")
-		}
 		switch {
 		case serverArgs.KMSKeyName != "" && serverArgs.TPMKeyFile != "":
 			return errors.New("--kms-key-name and --tpm-key-file are mutually exclusive")
-		case serverArgs.TPMKeyEscrowRcpts != "" && serverArgs.EscrowIdentityFile != "":
-			return errors.New("--tpm-key-escrow-recipients and --escrow-identity-file are mutually exclusive")
-		case serverArgs.TPMKeyEscrowRcpts != "" && serverArgs.TPMKeyFile == "":
-			return errors.New("--tpm-key-escrow-recipients requires --tpm-key-file")
-		case serverArgs.EscrowIdentityFile != "" && (serverArgs.KMSKeyName != "" || serverArgs.TPMKeyFile != ""):
-			return errors.New("--escrow-identity-file cannot be combined with --kms-key-name or --tpm-key-file")
 		case serverArgs.EscrowIdentityFile != "":
 			identities, err := readAgeFile(serverArgs.EscrowIdentityFile, age.ParseIdentities)
 			if err != nil {
@@ -708,15 +702,6 @@ func checkPutText(value []byte) ([]byte, error) {
 // loadAccessIndex reads an audit log from the specified path and constructs a
 // last-access index from it. It reports nil without error if the path does not
 // exist.
-func readAgeFile[T any](path string, parse func(io.Reader) ([]T, error)) ([]T, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return parse(f)
-}
-
 func loadAccessIndex(path string) (db.AccessIndex, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {

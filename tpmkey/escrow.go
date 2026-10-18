@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"filippo.io/age"
 	"filippo.io/age/armor"
@@ -22,9 +23,11 @@ import (
 // key in the file at escrowPath, encrypted with age to recipients, so that
 // the key can be recovered with [OpenEscrow] without the TPM.
 //
-// For a new key, the escrow copy is saved before the sealed key, so a sealed
-// key never exists without one. For an existing sealed key, a missing escrow
-// copy is written after unsealing; an existing escrow copy is left untouched.
+// For a new key, the escrow copy is saved and synced before the sealed key
+// file is saved, so a sealed key file never exists without one. For an
+// existing sealed key, a missing escrow copy is written after unsealing; an
+// existing escrow copy is left untouched. The two paths must name different
+// files.
 //
 // If the escrow file exists but the sealed key file does not, it reports an
 // error rather than generate a new key, since the escrow file may hold the
@@ -32,6 +35,9 @@ import (
 func OpenOrCreateEscrowed(tpm transport.TPM, path, escrowPath string, recipients []age.Recipient) (tink.AEAD, error) {
 	if len(recipients) == 0 {
 		return nil, errors.New("no escrow recipients")
+	}
+	if err := checkDistinct(path, escrowPath); err != nil {
+		return nil, err
 	}
 	escrowExists, err := fileExists(escrowPath)
 	if err != nil {
@@ -95,6 +101,42 @@ func writeEscrow(path string, secret []byte, recipients []age.Recipient) error {
 	}
 	if err := atomicfile.WriteFile(path, buf.Bytes(), 0600); err != nil {
 		return fmt.Errorf("writing escrow file: %w", err)
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("syncing escrow file directory: %w", err)
+	}
+	return nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
+}
+
+func checkDistinct(path, escrowPath string) error {
+	a, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	b, err := filepath.Abs(escrowPath)
+	if err != nil {
+		return err
+	}
+	same := a == b
+	if !same {
+		fa, errA := os.Stat(a)
+		fb, errB := os.Stat(b)
+		same = errA == nil && errB == nil && os.SameFile(fa, fb)
+	}
+	if same {
+		return fmt.Errorf("sealed key file %q and escrow file %q must be different files", path, escrowPath)
 	}
 	return nil
 }
