@@ -46,10 +46,11 @@ this compose file, whose TPM key, recipients, and device settings conflict
 with recovery. On the recovery machine, with the image built from this fork:
 
 ```
-mkdir -p state && cp <database backup> state/database
+umask 077
+mkdir state && cp <database backup> state/database
 cp setec-tpm.key.age state/
 age -d -i <yubikey identity> setec-escrow-identity.age > escrow-identity.txt
-sudo chown -R 65532:65532 state && chmod 0700 state
+sudo chown -R 65532:65532 state escrow-identity.txt
 
 docker run -d --name setec --restart unless-stopped --user 65532:65532 \
   -v "$PWD/state:/state" \
@@ -61,7 +62,9 @@ docker run -d --name setec --restart unless-stopped --user 65532:65532 \
   setec:<commit>
 ```
 
-`escrow-identity.txt` is the plaintext escrow identity; keep it only on the
-recovery machine, readable by uid 65532, for as long as recovery mode runs.
+`umask 077` makes every file above, including the plaintext escrow identity,
+private from its first write. After the `chown`, only uid 65532 and root can
+read them. Keep `escrow-identity.txt` only on the recovery machine, for as
+long as recovery mode runs.
 Remove the old `secrets` node from the tailnet first, or the new node joins
 under another name.
